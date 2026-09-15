@@ -1,7 +1,7 @@
 from pathlib import Path
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision.io import ImageReadMode, read_image
 
@@ -425,6 +425,181 @@ class VAE(nn.Module):
 
         return reconstruction, mu, logvar
 
+# ============================================================
+# VAE LOSS
+# ============================================================
+
+def vae_loss(
+    reconstruction,
+    target,
+    mu,
+    logvar
+):
+    """Compute the standard VAE objective.
+
+    The total loss contains two components:
+
+    1. Reconstruction loss
+       Measures how closely the decoded MRI matches the input MRI.
+
+    2. KL-divergence loss
+       Regularises the learned latent distribution toward N(0, 1).
+
+    Returns:
+        total_loss, reconstruction_loss, kl_loss
+    """
+
+    batch_size = target.size(0)
+
+    # What:
+    # Measure pixel-wise reconstruction error.
+    #
+    # Why:
+    # Both the input and sigmoid decoder output lie in [0, 1],
+    # so binary cross entropy can compare them directly.
+    reconstruction_loss = F.binary_cross_entropy(
+        reconstruction,
+        target,
+        reduction="sum"
+    ) / batch_size
+
+    # ★ CORE:
+    # KL divergence between:
+    #
+    #     q(z|x) = N(mu, sigma^2)
+    #
+    # and the standard normal prior:
+    #
+    #     p(z) = N(0, 1)
+    #
+    kl_loss = (
+        -0.5
+        * torch.sum(
+            1
+            + logvar
+            - mu.pow(2)
+            - logvar.exp()
+        )
+        / batch_size
+    )
+
+    total_loss = (
+        reconstruction_loss
+        + kl_loss
+    )
+
+    return (
+        total_loss,
+        reconstruction_loss,
+        kl_loss
+    )
+
+
+# ============================================================
+# SMOKE TRAINING TEST
+# ============================================================
+
+def smoke_train(
+    model,
+    train_loader,
+    device,
+    max_batches=2
+):
+    """Run a few training batches to verify the VAE pipeline.
+
+    This is only a debugging test, not the final model training.
+    """
+
+    model.train()
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=1e-3
+    )
+
+    # Keep one parameter before training so that we can verify
+    # that backpropagation actually updates the model.
+    first_parameter = next(
+        model.parameters()
+    )
+
+    parameter_before = (
+        first_parameter
+        .detach()
+        .clone()
+    )
+
+    print("\n--- VAE Smoke Training ---")
+
+    for batch_index, images in enumerate(
+        train_loader
+    ):
+
+        if batch_index >= max_batches:
+            break
+
+        images = images.to(
+            device,
+            non_blocking=True
+        )
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+        reconstruction, mu, logvar = model(
+            images
+        )
+
+        (
+            total_loss,
+            reconstruction_loss,
+            kl_loss
+        ) = vae_loss(
+            reconstruction,
+            images,
+            mu,
+            logvar
+        )
+
+        # Fail immediately if numerical instability occurs.
+        if not torch.isfinite(total_loss):
+
+            raise RuntimeError(
+                "VAE loss became non-finite."
+            )
+
+        total_loss.backward()
+
+        optimizer.step()
+
+        print(
+            f"Batch {batch_index + 1}/{max_batches} | "
+            f"total={total_loss.item():.4f} | "
+            f"reconstruction={reconstruction_loss.item():.4f} | "
+            f"KL={kl_loss.item():.4f}"
+        )
+
+    parameter_after = (
+        first_parameter
+        .detach()
+    )
+
+    parameters_changed = not torch.equal(
+        parameter_before,
+        parameter_after
+    )
+
+    print(
+        "Parameters updated:",
+        parameters_changed
+    )
+
+    assert parameters_changed
+
+    print(
+        "VAE smoke training: PASSED"
+    )
 
 # ============================================================
 # DATASET INSPECTION
@@ -595,6 +770,12 @@ def main():
         device
     )
 
+    smoke_train(
+        model,
+        train_loader,
+        device,
+        max_batches=2
+    )
 
 if __name__ == "__main__":
     main()
