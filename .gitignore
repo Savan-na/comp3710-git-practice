@@ -2,3 +2,7 @@
 # Demo 2 generated data and model checkpoints
 demo2/data/
 *.pt
+
+# Python cache
+__pycache__/
+*.pyc
